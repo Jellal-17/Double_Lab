@@ -50,7 +50,7 @@ class CartDoublePendulumEnvCfg(DirectMARLEnvCfg):
 
     # action scales
     cart_action_scale = 100.0  # [N]
-    pendulum_action_scale = 50.0  # [Nm]
+    pendulum_action_scale = 20.0  # [Nm]
 
     # reward scales
     rew_scale_alive = 1.0

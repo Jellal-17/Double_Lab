@@ -32,6 +32,7 @@ parser.add_argument(
     help="When no checkpoint provided, use the last saved model. Otherwise use the best saved model.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument("--run_name", type=str, default=None, help="Name of the run.")
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -57,6 +58,7 @@ from isaaclab_rl.rl_games import RlGamesGpuEnv, RlGamesVecEnvWrapper
 from rl_games.common import env_configurations, vecenv
 from rl_games.common.player import BasePlayer
 from rl_games.torch_runner import Runner
+from datetime import datetime
 
 from isaaclab.envs import DirectMARLEnv, multi_agent_to_single_agent
 from isaaclab.utils.assets import retrieve_file_path
@@ -78,7 +80,12 @@ def main():
     # specify directory for logging experiments
     log_root_path = os.path.join("logs", "rl_games", agent_cfg["params"]["config"]["name"])
     log_root_path = os.path.abspath(log_root_path)
-    print(f"[INFO] Loading experiment from directory: {log_root_path}")
+    # print(f"[INFO] Loading experiment from directory: {log_root_path}")
+    formatted_time = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_name = args_cli.run_name if args_cli.run_name is not None else "unknown_task"
+    log_dir = f"{run_name}_{formatted_time}_train"
+    
+    print(f"[INFO] Logging experiment in directory: {log_root_path}/{log_dir}")
     # find checkpoint
     if args_cli.use_pretrained_checkpoint:
         resume_path = get_published_pretrained_checkpoint("rl_games", args_cli.task)
@@ -89,11 +96,12 @@ def main():
         # specify directory for logging runs
         run_dir = agent_cfg["params"]["config"].get("full_experiment_name", ".*")
         # specify name of checkpoint
-        if args_cli.use_last_checkpoint:
-            checkpoint_file = ".*"
-        else:
-            # this loads the best checkpoint
-            checkpoint_file = f"{agent_cfg['params']['config']['name']}.pth"
+        # if args_cli.use_last_checkpoint:
+        #     checkpoint_file = ".*"
+        # else:
+        #     # this loads the best checkpoint
+        #     checkpoint_file = f"{agent_cfg['params']['config']['name']}.pth"
+        checkpoint_file = f"{agent_cfg['params']['config']['name']}.pth" if not args_cli.use_last_checkpoint else ".*"
         # get path to previous checkpoint
         resume_path = get_checkpoint_path(log_root_path, run_dir, checkpoint_file, other_dirs=["nn"])
     else:
@@ -165,6 +173,23 @@ def main():
     # note: We simplified the logic in rl-games player.py (:func:`BasePlayer.run()`) function in an
     #   attempt to have complete control over environment stepping. However, this removes other
     #   operations such as masking that is used for multi-agent learning by RL-Games.
+    
+    # Extract or define the goal state
+    # This example uses env.unwrapped.cfg.goal_state & success_threshold if present
+    if hasattr(env.unwrapped.cfg, "goal_state") and hasattr(env.unwrapped.cfg, "success_threshold"):
+        goal_state = torch.tensor(env_cfg.goal_state, dtype=torch.float32, device="cuda:0")
+        # Double-pendulum angles are normalized to [-pi, pi]
+        goal_state[:2] = (goal_state[:2] + math.pi) % (2 * math.pi) - math.pi
+        success_threshold = env_cfg.success_threshold
+    else:
+        # Fallback
+        goal_state = torch.tensor([-math.pi, 0.0, 0.0, 0.0], dtype=torch.float32, device="cuda:0")
+        success_threshold = 0.1
+    
+    max_steps = int(env_cfg.episode_length_s / dt) if hasattr(env_cfg, "episode_length_s") else 1800
+    goal_reached = False
+    step_count = 0
+    
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
@@ -176,23 +201,40 @@ def main():
             # env stepping
             obs, _, dones, _ = env.step(actions)
 
+            step_count += 1
             # perform operations for terminated episodes
-            if len(dones) > 0:
+            if len(dones) > 0 and any(dones):
                 # reset rnn state for terminated episodes
-                if agent.is_rnn and agent.states is not None:
-                    for s in agent.states:
-                        s[:, dones, :] = 0.0
+                break
+        
+        # Check if goal is reached
+        state = obs
+        diff = state - goal_state
+        if torch.norm(diff, dim=-1).item() < success_threshold:
+            goal_reached = True
+            break
+        
+        if step_count >= max_steps:
+            break
+        
         if args_cli.video:
             timestep += 1
             # Exit the play loop after recording one video
-            if timestep == args_cli.video_length:
-                break
-
+            # if timestep == args_cli.video_length:
+            #     break
+        
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
 
+    # Once done, print the time or fail
+    if goal_reached:
+        time_to_goal = dt * step_count
+        print(f"TIME_TO_GOAL={time_to_goal:.4f}")
+    else:
+        print("TIME_TO_GOAL=FAIL")
+            
     # close the simulator
     env.close()
 
